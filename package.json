@@ -1,0 +1,21 @@
+{
+    "name": "rag-pgvector-demo",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "description": "Phase 0 RAG demo — pgvector on Postgres + Ollama. You don't need a vector database.",
+    "scripts": {
+        "db:up": "docker compose up -d",
+        "db:down": "docker compose down",
+        "db:reset": "docker compose down -v && docker compose up -d",
+        "schema": "node --env-file=.env src/schema.js",
+        "ingest": "node --env-file=.env src/ingest.js",
+        "query": "node --env-file=.env src/query.js"
+    },
+    "dependencies": {
+        "pg": "^8.13.1"
+    },
+    "engines": {
+        "node": ">=20.6"
+    }
+}
