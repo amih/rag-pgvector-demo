@@ -20,8 +20,10 @@ question ──▶ embed ──▶ nearest chunks (cosine) ──▶ prompt ─�
 - **Ollama** running locally, with the two models pulled:
   ```bash
   ollama pull nomic-embed-text   # embeddings (768 dims)
-  ollama pull llama3.2           # answer generation
+  ollama pull llama3.1:8b        # answer generation
   ```
+  (`llama3.1:8b` gives much better grounded answers than the tiny `llama3.2`. See
+  [Getting better answers](#getting-better-answers).)
 
 ## Setup
 
@@ -60,8 +62,25 @@ Drop your own `.md` / `.txt` files into `docs/` (e.g. your smallestbusiness.com 
 | `DATABASE_URL` | `postgres://rag:rag@localhost:5462/rag` | Postgres connection |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama API base |
 | `EMBED_MODEL` / `EMBED_DIM` | `nomic-embed-text` / `768` | embedding model + its dimension |
-| `CHAT_MODEL` | `llama3.2` | generation model |
+| `CHAT_MODEL` | `llama3.1:8b` | generation model |
 | `TOP_K` | `5` | chunks retrieved per query |
+| `NUM_CTX` | `8192` | generation context window (must fit passages + question) |
+| `TEMPERATURE` | `0.2` | lower = more grounded |
+
+## Getting better answers
+
+Retrieval and generation are separate steps, and they fail separately. If the printed **similarity scores**
+are high (~0.7+) but the **answer** is a shrug ("I don't know"), the retrieval was fine and the *generation*
+is the problem. Usual causes, in order:
+
+1. **The model is too small.** `llama3.2` (3B) often refuses even with the right passages in front of it. Use
+   `CHAT_MODEL=llama3.1:8b` (default), or `qwen2.5:14b-instruct` / larger on a beefy machine.
+2. **The context window is too small.** If the passages + question overflow `NUM_CTX`, Ollama truncates the
+   prompt and the model literally can't see the question. Keep `NUM_CTX` ≥ 8192 for `TOP_K=5`.
+3. **Too few / too many chunks.** Tune `TOP_K`. More chunks = more coverage but more noise (and more context).
+
+If instead the **similarity scores are low** (~0.4 and below), that's a *retrieval* miss — the answer isn't in
+your docs, or your chunks are too big/small. Tune the chunker in `src/chunk.js`.
 
 ## Reset
 
