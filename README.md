@@ -71,6 +71,11 @@ npm run db:reset && npm run schema   # wipe the volume and start clean
 
 ## Where this goes next
 
-This is Phase 0. Phase 1 puts a security gateway in front of the model (prompt-injection defense, PII redaction,
-output validation, spend caps, tracing) — the same retrieval flow, but governed. See the strategy doc in the
-amiheines.com repo (`PLAN/AI_SECURITY_GOVERNANCE_STRATEGY_2026-07.md`).
+This is a starting point. The natural next step is to put a security gateway in front of the model —
+prompt-injection defense, PII redaction, output validation, spend caps, and tracing — so the same retrieval
+flow runs *governed*. See [smallestbusiness/guardrail](https://github.com/smallestbusiness/guardrail) for the
+fail-closed AI gateway that pattern builds on.
+
+---
+
+Built by [Ami Heines](https://amiheines.com) · more at [smallestbusiness.com](https://smallestbusiness.com).
