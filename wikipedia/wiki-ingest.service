@@ -13,11 +13,11 @@ Wants=network-online.target
 Type=simple
 User=arcade
 Group=arcade
-WorkingDirectory=/mnt/nvme3/wiki-rag
-EnvironmentFile=/mnt/nvme3/wiki-rag/.env
+WorkingDirectory=/mnt/nvme3/rag-pgvector-demo/wikipedia
+EnvironmentFile=/mnt/nvme3/rag-pgvector-demo/wikipedia/.env
 Environment=HF_HOME=/mnt/nvme3/hf-cache
 Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-ExecStart=/mnt/nvme3/rag-venv/bin/python -u /mnt/nvme3/wiki-rag/ingest.py
+ExecStart=/mnt/nvme3/rag-venv/bin/python -u /mnt/nvme3/rag-pgvector-demo/wikipedia/ingest.py
 # Restart only on crash/OOM/reboot (resumes from the DB cursor). A clean finish
 # or `systemctl stop` exits 0 and does NOT trigger a restart.
 Restart=on-failure
