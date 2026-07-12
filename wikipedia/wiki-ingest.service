@@ -1,0 +1,29 @@
+# Durable, resumable Wikipedia ingest. Install on the server with:
+#   sudo cp wiki-ingest.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now wiki-ingest
+# Watch:   journalctl -u wiki-ingest -f
+# Pause:   sudo systemctl stop wiki-ingest      (frees the GPU; resumes from cursor)
+# Resume:  sudo systemctl start wiki-ingest
+[Unit]
+Description=Wikipedia RAG ingest (nomic-768 -> pgvector on NVMe)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=arcade
+Group=arcade
+WorkingDirectory=/mnt/nvme3/wiki-rag
+EnvironmentFile=/mnt/nvme3/wiki-rag/.env
+Environment=HF_HOME=/mnt/nvme3/hf-cache
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ExecStart=/mnt/nvme3/rag-venv/bin/python -u /mnt/nvme3/wiki-rag/ingest.py
+# Restart only on crash/OOM/reboot (resumes from the DB cursor). A clean finish
+# or `systemctl stop` exits 0 and does NOT trigger a restart.
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=180
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

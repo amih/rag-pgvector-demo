@@ -1,0 +1,10 @@
+libzim>=3.4
+psycopg[binary]>=3.1
+numpy
+
+# For EMBED_BACKEND=st (the fast GPU path). Install a CUDA torch build that
+# still supports Pascal / SM 6.1 (the GTX 1080) FIRST, then this:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install sentence-transformers einops
+sentence-transformers>=2.7
+einops
