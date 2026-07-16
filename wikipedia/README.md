@@ -105,6 +105,45 @@ SELECT next_entry_id, chunks_done,
        round(100.0*next_entry_id/19707079,2) AS pct FROM ingest_cursor;
 ```
 
+## Querying — `query.py` (one-shot) vs `chat.py` (agentic)
+
+Both embed the question locally (`nomic-embed-text`, `search_query:` prefix) and
+retrieve via pgvector cosine; generation is a local Ollama model. **Source the
+`.env` first** — `config.py`'s default `db_url` points at the old `:5462/rag`,
+the real DB is `:5463/wiki`.
+
+```bash
+set -a; . ./.env; set +a
+
+# one-shot RAG: embed → top-k → grounded, cited answer
+python query.py "what causes the northern lights?"
+
+# agentic: multi-query planning + refine loop + multi-turn + [n] citations
+python chat.py                        # interactive REPL (':q' to quit)
+python chat.py "compare the causes of WWI and WWII"   # one-shot
+```
+
+`chat.py` adds, over `query.py`:
+- **multi-query planning** — the model rewrites your question into several
+  diverse search queries, so one bad phrasing doesn't sink recall;
+- **agentic refine loop** — after seeing the first evidence it may issue
+  follow-up searches (multi-hop) before answering;
+- **multi-turn memory** in the REPL; each turn prints its searches live.
+
+Tuning (env vars):
+
+| var | default | effect |
+|---|---|---|
+| `AGENT_MODEL` | `llama3.1:8b` | generator; `qwen2.5:14b` is sharper but spills to CPU while the ingest holds the GPU |
+| `AGENT_PLAN_MAX` | `3` | max search queries per question |
+| `AGENT_REFINE_STEPS` | `2` | extra follow-up search rounds |
+| `AGENT_CTX_CHUNKS` | `10` | passages shown to the model |
+
+> **Speed:** until `build_index.py` has built the HNSW index, every search is an
+> exact seqscan over the whole table (~21 s on 15M+ rows, measured). After
+> indexing it drops to milliseconds. `chat.py` runs several searches per turn, so
+> it is really meant for the post-index index.
+
 ## How resume works
 
 `ingest_cursor` is a one-row table holding `next_entry_id`. Each batch does the
