@@ -1,2 +1,6 @@
 node_modules/
 .env
+
+# Private, operator-only docs — never publish (real hostnames/infra live here)
+*.private.md
+*.local.md
