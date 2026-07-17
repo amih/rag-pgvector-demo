@@ -11,6 +11,10 @@ Why this exists (and why it is not query.py):
   exactly wrong for exploration, where the interesting hit is the unreasonable
   one. So this prints the retrieved chunks and nothing else.
 
+Write probes in the voice of the prose you are hunting, not as a description of
+the category you want — see the note above DEFAULT_PROBES. It is the single
+biggest lever on result quality.
+
 Three choices that matter for finding the obscure:
 
   --skip N        The nearest hit is the most *central* article for a phrasing,
@@ -31,36 +35,52 @@ from db import connect, vec_literal
 
 # Probe archetypes: each asks for something whose answer is a *sentence inside an
 # article about something else* — no category, no hub page, no obvious keyword.
+#
+# HOW TO WRITE A PROBE — this is the whole craft, and it is counter-intuitive:
+# write the probe as a sentence that could appear *in* the article, not as a
+# description of the category you want. The embedding matches aboutness, so an
+# abstract phrasing retrieves articles about the abstraction. Measured:
+#
+#   "the reason has never been satisfactorily explained"
+#       -> Four causes, Brute fact, Kalam cosmological argument   (dist 0.29)
+#          i.e. philosophy-of-explanation. Useless.
+#   "despite years of investigation the cause of the explosion was never determined"
+#       -> KLM Flight 608, Allegheny Arsenal, Buncefield fire     (dist 0.21)
+#          i.e. actual unexplained explosions. What we wanted.
+#
+# Same idea, concrete register, and the distances drop by ~0.08. Stay in the
+# voice of the prose you are hunting: past tense, specific nouns, no meta-words
+# like "concept", "example of", "category".
 DEFAULT_PROBES = [
     # -- nameless concepts: you know the shape, not the term --
-    "a machine that was already obsolete before it was finished being built",
-    "a building designed for a purpose it never actually served",
-    "an English word that entered the language through a mistranslation or misreading",
-    "a project abandoned when the money ran out, left half-built and still standing",
+    "by the time the machine was completed the problem it had been built to solve no longer existed",
+    "the building was finished but never used for its intended purpose and stood empty for years",
+    "the word entered English through a mistranslation and the error was never corrected",
+    "construction was abandoned when the funding ran out and the unfinished structure still stands",
 
-    # -- Wikipedia's own hedges: uncertainty has no category --
-    "the reason for this has never been satisfactorily explained",
-    "no photograph or portrait of him is known to exist",
-    "its current whereabouts are unknown and it has not been seen since",
-    "the last person who knew how to make it died without passing on the technique",
-    "the only known surviving example of its kind",
+    # -- hedges: uncertainty is scattered through prose and has no category --
+    "despite years of investigation the cause was never determined",
+    "no photograph of him is known to survive",
+    "it was last seen in 1932 and its present location is unknown",
+    "he died without passing on the technique and it has never been reproduced since",
+    "it is the only surviving example, the others having been destroyed",
 
     # -- structural rhymes: the pattern cuts across topics, so categories can't hold it --
-    "an institution that outlived the purpose it was created for by centuries",
-    "a technical standard kept in place only because fixing the error would break compatibility",
-    "a tradition invented recently but widely believed to be ancient",
-    "a rule or law that produced the exact opposite of its intended effect",
-    "a measurement later found to be based on a mistake but kept anyway",
+    "the organisation continued to exist for centuries after the reason for its founding had disappeared",
+    "the mistake was discovered but by then too many systems depended on it to change",
+    "the ceremony was invented in the nineteenth century although it was believed to be medieval",
+    "the law had the opposite effect to the one intended and was quietly repealed",
+    "the standard was based on a miscalculation but was kept for compatibility",
 
     # -- negative space: defined by what is missing --
-    "a war that was never formally ended, only paused",
-    "a recording or film that no longer exists and was never copied",
-    "an invention whose true inventor is disputed or unknown despite being recent",
+    "the two countries never signed a peace treaty and remain technically at war",
+    "no copy of the film is known to survive and it is considered lost",
+    "the identity of the inventor remains disputed to this day",
 
     # -- buried biography clauses --
-    "a person who survived two separate unrelated disasters",
-    "someone famous for one thing who spent their life trying to be known for another",
-    "an amateur whose side hobby outlasted their professional work",
+    "he survived both disasters and later wrote about the coincidence",
+    "he resented being remembered only for the invention and thought his real work lay elsewhere",
+    "an amateur, he made the discovery in his spare time while working another job",
 ]
 
 
