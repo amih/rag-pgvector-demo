@@ -98,7 +98,10 @@ def search(conn, qvec, k, skip, pool_mult, keep_lists):
     lit = vec_literal(qvec)
     with conn.cursor() as cur:
         # ef_search must exceed the number of rows we want or recall collapses.
-        cur.execute("SET LOCAL hnsw.ef_search = %s", (max(cfg.ef_search, pool),))
+        # set_config(..., true) == SET LOCAL, but takes a bound parameter; plain
+        # SET LOCAL only accepts a literal.
+        cur.execute("SELECT set_config('hnsw.ef_search', %s, true)",
+                    (str(max(cfg.ef_search, pool)),))
         cur.execute(
             f"""SELECT article_id, title, content,
                        embedding <=> %s::{cfg.vector_type} AS dist
@@ -154,13 +157,21 @@ def main():
 
     with connect() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT count(DISTINCT article_id), count(*), max(title) FROM wiki_chunks")
-        narticles, nchunks, maxtitle = cur.fetchone()
+        # Both cheap: one row from the cursor table, one PK-ordered row. Avoid
+        # count(*)/max(title) here — they are seqscans over 20M+ rows.
+        cur.execute("SELECT chunks_done FROM ingest_cursor WHERE id = 1")
+        (chunks_done,) = cur.fetchone() or (0,)
+        # Ingest is serial in ZIM order, which is alphabetical, so the newest row
+        # is the alphabetical high-water mark.
+        cur.execute("SELECT title FROM wiki_chunks ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        hwm = row[0] if row else ""
+
         emit(f"# Gem hunt — {len(probes)} probe(s)")
         emit()
-        emit(f"Corpus: {narticles:,} articles / {nchunks:,} chunks. "
-             f"Alphabetical high-water mark: `{maxtitle[:40]}`")
-        if (maxtitle or "") < "M":
+        emit(f"Corpus: {chunks_done:,} chunks ingested. "
+             f"Alphabetical high-water mark: `{hwm[:48]}`")
+        if hwm[:1].upper() < "M":
             emit()
             emit("> **Partial corpus.** The ingest walks the ZIM alphabetically and has "
                  "not passed 'M' yet, so roughly half of Wikipedia (M-Z) is missing. "
