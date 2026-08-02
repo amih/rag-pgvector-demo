@@ -144,6 +144,48 @@ Tuning (env vars):
 > indexing it drops to milliseconds. `chat.py` runs several searches per turn, so
 > it is really meant for the post-index index.
 
+## Serving it on the web — `ask_web.py`
+
+A small read-only front end (Flask + waitress) exposing two endpoints and a
+single-page UI. `pip install flask waitress`, then:
+
+```bash
+set -a; . ./.env; set +a
+waitress-serve --listen=127.0.0.1:3600 --threads=8 ask_web:app
+```
+
+| endpoint | cost | notes |
+|---|---|---|
+| `GET /api/search?q=&k=` | ~0.5 s, no GPU | pure pgvector similarity, one chunk per article |
+| `GET /api/ask?q=` | ~8 s, holds the GPU | retrieve → generate, `[n]` citations |
+| `GET /healthz` | — | today's answer count vs the daily budget |
+
+**The two are deliberately asymmetric, and that asymmetry is the whole
+protection design.** A requests-per-second limit is the wrong control for
+`/api/ask`: the binding resource is not request rate but a single GPU serving
+one generation at a time. Ten clients each politely sending 1 req/s still queue
+forever. So put the crude flood limits in your reverse proxy (`limit_req`,
+`limit_conn`, body size) and keep the expensive-resource limits here:
+
+- `BoundedSemaphore(1)` around generation, with a **bounded wait** — return 503
+  rather than let a queue build behind the GPU;
+- per-IP sliding windows for answers and searches;
+- a **global daily answer budget** — denial-of-wallet control, with the GPU as
+  the wallet;
+- a question-length cap.
+
+All in-process memory, because one GPU means one worker; counters reset on
+restart, which is fine — they bound abuse, they don't bill anyone. Tune with
+`ASK_DAILY_BUDGET`, `ASK_IP_HOURLY`, `ASK_IP_SEARCH_HOURLY`, `ASK_GEN_WAIT`,
+`ASK_GEN_TIMEOUT`, `ASK_MAX_Q`.
+
+> Testing rate limits **sequentially proves nothing** — six sequential 8-second
+> requests stay inside any sane token bucket and all return 200. Test with real
+> concurrency: `seq 1 40 | xargs -P 40 -I{} curl -s -o /dev/null -w "%{http_code} " ...`
+
+Content served this way is Wikipedia text: keep the CC BY-SA attribution and the
+citation links that the UI already renders.
+
 ## How resume works
 
 `ingest_cursor` is a one-row table holding `next_entry_id`. Each batch does the

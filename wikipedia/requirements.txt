@@ -8,3 +8,7 @@ numpy
 #   pip install sentence-transformers einops
 sentence-transformers>=2.7
 einops
+
+# For ask_web.py only (the read-only web front end). Not needed to ingest,
+# index, or query from the CLI.
+#   pip install flask waitress
