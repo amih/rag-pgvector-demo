@@ -1,0 +1,22 @@
+# Embed PubMed abstracts on the GPU via Ollama; pauses whenever anything else
+# uses the GPU (see gpu_gate.py). Manual pause: touch /mnt/nvme3/litdb/PAUSE
+[Unit]
+Description=litdb: embed PubMed abstracts (yields GPU to other jobs)
+After=docker.service ollama.service
+Wants=ollama.service
+
+[Service]
+Type=simple
+User=arcade
+Group=arcade
+WorkingDirectory=/mnt/nvme3/rag-pgvector-demo/litdb
+ExecStart=/mnt/nvme3/rag-venv/bin/python -u embed_pubmed.py
+Restart=on-failure
+RestartSec=60
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=200%
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

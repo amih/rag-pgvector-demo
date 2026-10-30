@@ -1,0 +1,11 @@
+# Weekly refresh (PubMed publishes daily update files). Saturday 01:00, clear of
+# the 04:00 HDD backup.
+[Unit]
+Description=litdb weekly refresh
+
+[Timer]
+OnCalendar=Sat 01:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

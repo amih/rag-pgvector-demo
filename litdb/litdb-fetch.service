@@ -1,0 +1,18 @@
+# Download/refresh PubMed + ChEMBL + Dr. Duke + LOTUS, then load PubMed into Postgres.
+# CPU/IO-polite: nice 19, idle I/O class, at most 8 of 48 cores.
+[Unit]
+Description=litdb: fetch literature datasets + load PubMed
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=arcade
+Group=arcade
+WorkingDirectory=/mnt/nvme3/rag-pgvector-demo/litdb
+ExecStart=/mnt/nvme3/rag-pgvector-demo/litdb/download.sh
+ExecStart=/mnt/nvme3/rag-venv/bin/python -u load_pubmed.py
+Nice=19
+IOSchedulingClass=idle
+CPUQuota=800%
+TimeoutStartSec=infinity

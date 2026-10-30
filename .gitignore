@@ -4,3 +4,4 @@ node_modules/
 # Private, operator-only docs — never publish (real hostnames/infra live here)
 *.private.md
 *.local.md
+__pycache__/
