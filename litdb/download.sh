@@ -3,7 +3,7 @@
 # Idempotent: re-run any time; wget -N / -c only fetches what changed.
 # Polite: one connection, rate-capped, idle I/O priority (set in the unit).
 set -euo pipefail
-RAW=${RAW:-/mnt/hdd/litdb}
+RAW=${RAW:-/mnt/nvme3/litdb/raw}
 RATE=${RATE:-10m}
 W="wget -q -c --limit-rate=$RATE --tries=20 --waitretry=30"
 # get FILE URL: fetch once (these files are versioned by name or rarely change).

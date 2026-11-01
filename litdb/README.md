@@ -2,11 +2,15 @@
 
 | What | Where | Size (approx.) |
 |---|---|---|
-| PubMed baseline + updates (XML) | `$RAW/pubmed` (HDD) | ~45 GB gz |
+| PubMed baseline + updates (XML) | `$RAW/pubmed` (NVMe) | ~45 GB gz |
 | ChEMBL (SQLite) — bioactivity, incl. tubulin assays | `$RAW/chembl` | ~30 GB |
 | Dr. Duke's Phytochemical & Ethnobotanical DB (CSV) | `$RAW/duke` | small |
 | LOTUS (structure–organism pairs, CSV) | `$RAW/lotus` | ~0.5 GB |
 | Postgres `litdb`: `pubmed_articles`, `pubmed_emb` (nomic-768, halfvec) | wiki-rag container :5463 (NVMe) | ~130 GB with index |
+
+`$RAW` defaults to `/mnt/nvme3/litdb/raw`. Keep it off any disk that is the target of
+an `rsync --delete` backup, and exclude it from backups: everything here can be
+downloaded again.
 
 Pipeline: `litdb-fetch.service` (download.sh → load_pubmed.py, weekly timer) and
 `litdb-embed.service` (embed_pubmed.py, runs continuously, **yields the GPU** —

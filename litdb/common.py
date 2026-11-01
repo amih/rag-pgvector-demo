@@ -10,7 +10,7 @@ import urllib.request
 
 import psycopg
 
-RAW       = os.environ.get("RAW", "/mnt/hdd/litdb")
+RAW       = os.environ.get("RAW", "/mnt/nvme3/litdb/raw")
 DB_URL    = os.environ.get("LITDB_URL", "postgres://rag:rag@localhost:5463/litdb")
 OLLAMA    = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 EMB_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
