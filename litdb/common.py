@@ -25,13 +25,18 @@ def vec_literal(v):
     return "[" + ",".join(f"{x:.6f}" for x in v) + "]"
 
 
+# Requests go through the GPU queue as background work and may wait there while other
+# programs hold the card, so allow a long wait (default 3 hours).
+EMBED_TIMEOUT = int(os.environ.get("EMBED_TIMEOUT", 3 * 3600))
+
+
 def embed(texts, keep_alive="1m"):
     # Short keep_alive: when we pause for another GPU job, nomic leaves VRAM fast.
     body = json.dumps({"model": EMB_MODEL, "input": texts, "keep_alive": keep_alive,
                        "truncate": True, "options": {"num_ctx": 2048}}).encode()
     req = urllib.request.Request(OLLAMA + "/api/embed", data=body,
                                  headers={"Content-Type": "application/json"})
-    return json.loads(urllib.request.urlopen(req, timeout=600).read())["embeddings"]
+    return json.loads(urllib.request.urlopen(req, timeout=EMBED_TIMEOUT).read())["embeddings"]
 
 
 SCHEMA = """

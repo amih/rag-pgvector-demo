@@ -14,6 +14,7 @@ its own connection. Serially, a 64-row batch spent ~2 s in the database for ever
 import os
 import signal
 import time
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
 from common import DOC_PREFIX, connect, embed, vec_literal
@@ -45,6 +46,31 @@ def wait_for_gpu():
         time.sleep(30)
         reason = busy()
     print(f"[resume] after {(time.time() - since) / 60:.0f} min", flush=True)
+
+
+def embed_retrying(texts):
+    """embed(), but a timeout or a refused/broken connection means wait and try again
+    (the queue was busy, or Ollama or the queue was restarting), not crash. Waits 30 s,
+    doubling to at most 10 min, for as long as it takes. Returns None if told to stop."""
+    delay, tries = 30, 0
+    while not STOP:
+        try:
+            embs = embed(texts)
+            if tries:
+                print(f"[retry] ok after {tries} failed tries", flush=True)
+            return embs
+        except (TimeoutError, ConnectionError, urllib.error.URLError, OSError) as e:
+            if isinstance(e, urllib.error.HTTPError) and e.code < 500:
+                raise                  # a bad request will not get better by waiting
+            tries += 1
+            print(f"[retry] {type(e).__name__}: {e}; try {tries + 1} in {delay} s", flush=True)
+            for _ in range(delay):
+                if STOP:
+                    break
+                time.sleep(1)
+            delay = min(delay * 2, 600)
+            wait_for_gpu()
+    return None
 
 
 def batch(cur, prio, after):
@@ -103,7 +129,9 @@ def main():
         if len(rows) == BATCH:
             nxt = (prio, rows[-1][0], pool.submit(fetch, rconn, prio, rows[-1][0]))
         texts = [DOC_PREFIX + (t + "\n" + a)[:MAX_CHARS] for _, t, a in rows]
-        embs = embed(texts)
+        embs = embed_retrying(texts)
+        if embs is None:
+            break
         if pending_write:
             pending_write.result()     # surface write errors; one write in flight at most
         pending_write = pool.submit(write, wconn, rows, embs)
