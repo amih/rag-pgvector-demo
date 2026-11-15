@@ -5,7 +5,9 @@
 set -euo pipefail
 RAW=${RAW:-/mnt/nvme3/litdb/raw}
 RATE=${RATE:-10m}
-W="wget -q -c --limit-rate=$RATE --tries=20 --waitretry=30"
+# Zenodo answers 403 "unusual traffic" to the default curl/wget User-Agent.
+UA="litdb-fetch/1.0"  # no spaces: $W is word-split
+W="wget -q -c -U $UA --limit-rate=$RATE --tries=20 --waitretry=30"
 # get FILE URL: fetch once (these files are versioned by name or rarely change).
 get() { [ -s "$1" ] || $W -O "$1.part" "$2" && { [ -s "$1" ] || mv "$1.part" "$1"; }; }
 mkdir -p "$RAW"/{pubmed/baseline,pubmed/updatefiles,chembl,duke,lotus}
@@ -35,7 +37,7 @@ echo "[duke] Dr. Duke's Phytochemical and Ethnobotanical DB (USDA, CC0)"
     && unzip -oq Duke-Source-CSV.zip )
 
 echo "[lotus] latest frozen dataset (Zenodo)"
-LOT=$(curl -sL https://zenodo.org/api/records/5794106/versions/latest)
+LOT=$(curl -sfL -A "$UA" https://zenodo.org/api/records/5794106/versions/latest)
 echo "$LOT" | python3 -c '
 import sys, json
 for f in json.load(sys.stdin)["files"]:
