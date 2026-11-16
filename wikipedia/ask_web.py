@@ -338,10 +338,7 @@ phytochemical database and LOTUS natural products. Each database keeps its own t
 <div class=opts><label>PubMed from year <input type=number id=yr min=1800 max=2100 placeholder=any></label></div>
 </fieldset>
 <fieldset><legend>Deep research</legend>
-<div><span class=opts>Model:</span> <span id=engines></span></div>
-<div><span class=opts>Priority on the GPU:</span>
-<label><input type=radio name=prio value=interactive> Interactive &mdash; goes ahead of batch work, I'm waiting</label>
-<label><input type=radio name=prio value=background checked> Background &mdash; runs when the card is free, check back later</label></div>
+<div id=modes></div>
 <div class=jobs id=jobs></div>
 </fieldset>
 <details class=how><summary>How deep research works</summary>
@@ -365,7 +362,7 @@ indirect links (A &rarr; B &rarr; C, with how strong each step is), gaps, and hy
 <p><b>Model.</b> The local model is free but small: it plans and links less well, and every call waits its turn on
 the one GPU, so a run takes several minutes, longer at background priority. Claude reads far more evidence and reasons
 better; it costs money per run (typically well under a dollar), shown with the report. Steps 2 and 3's database joins
-are the same either way. <b>Priority</b> only matters for the local model.</p>
+are the same either way. <i>Now</i> puts the local model ahead of other work on the GPU; <i>in the background</i> lets it wait for an idle GPU.</p>
 <h3 style="font-size:1rem;margin:1rem 0 .3rem">Where the data comes from</h3>
 <p>All five databases are open or free to use, downloaded in full and kept on one home server, so a search never
 leaves the machine (only Claude runs send the question and the found passages to Anthropic). They live in
@@ -420,16 +417,17 @@ fetch('/api/me').then(r=>r.json()).then(d=>{
     +((!saved||saved.includes(s.id))?' checked':'')+'> <span class="badge b-'+s.id+'">'+esc(s.label)+'</span></label>').join('');
   document.querySelectorAll('#srcs input').forEach(x=>x.onchange=()=>localStorage.setItem('ask_sources',JSON.stringify(picked())));
 });
-const saved_eng=localStorage.getItem('ask_engine'),saved_prio=localStorage.getItem('ask_prio');
+const saved_mode=localStorage.getItem('ask_deep_mode');
 fetch('/api/me').then(r=>r.json()).then(d=>{
-  const E=d.engines||[];
-  document.getElementById('engines').innerHTML=E.map((e,i)=>'<label><input type=radio name=engine value='+e.id
-    +((saved_eng?saved_eng===e.id:i===0)?' checked':'')+'> '+esc(e.label)+'</label>').join('')
-    +(E.length<2?' <span class=opts>(Claude: no API key set on the server)</span>':'');
-  document.querySelectorAll('input[name=engine]').forEach(x=>x.onchange=()=>localStorage.setItem('ask_engine',x.value));
-  if(saved_prio){const p=document.querySelector('input[name=prio][value='+saved_prio+']');if(p)p.checked=true}
-  document.querySelectorAll('input[name=prio]').forEach(x=>x.onchange=()=>localStorage.setItem('ask_prio',x.value));
-  if(!document.querySelector('input[name=engine]:checked')&&E.length)document.querySelector('input[name=engine]').checked=true;
+  const hasClaude=(d.engines||[]).some(e=>e.id==='claude');
+  const M=[];
+  if(hasClaude)M.push(['claude','<b>Claude</b> &mdash; best report, about $0.25 a run']);
+  M.push(['local-interactive','<b>Local model, now</b> &mdash; free, goes ahead of other work on the home GPU']);
+  M.push(['local-background','<b>Local model, in the background</b> &mdash; free, runs when the GPU is idle; check back later']);
+  const pick=M.some(m=>m[0]===saved_mode)?saved_mode:M[0][0];
+  document.getElementById('modes').innerHTML=M.map(m=>'<label><input type=radio name=mode value='+m[0]
+    +(m[0]===pick?' checked':'')+'> '+m[1]+'</label>').join('<br>');
+  document.querySelectorAll('input[name=mode]').forEach(x=>x.onchange=()=>localStorage.setItem('ask_deep_mode',x.value));
 });
 function loadJobs(){fetch('/api/deep').then(r=>r.json()).then(d=>{
   const j=d.jobs||[];document.getElementById('jobs').innerHTML=j.length?'Your recent runs: '+j.slice(0,8).map(x=>
@@ -473,8 +471,8 @@ function showDeep(id){
 async function goDeep(){
   const q=qi.value.trim(); if(!q) return;
   const src=picked(); if(!src.length){out.innerHTML='<p class=err>Pick at least one database.</p>';return}
-  const eng=(document.querySelector('input[name=engine]:checked')||{}).value||'local';
-  const prio=(document.querySelector('input[name=prio]:checked')||{}).value||'background';
+  const mode=(document.querySelector('input[name=mode]:checked')||{}).value||'local-background';
+  const eng=mode==='claude'?'claude':'local',prio=mode==='local-interactive'?'interactive':'background';
   out.innerHTML='<p class=sub>Starting deep research&hellip;</p>';
   const r=await fetch('/api/deep',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({q,sources:src,from:yr.value||null,engine:eng,priority:prio})});
