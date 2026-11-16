@@ -178,7 +178,9 @@ waitress-serve --listen=127.0.0.1:3600 --threads=8 ask_web:app
 |---|---|---|
 | `GET /api/search?q=&sources=&from=&k=` | ~1 s, no GPU | top hits per database |
 | `GET /api/ask?q=&sources=&from=` | ~10 s, holds the GPU | retrieve → generate, `[n]` citations |
-| `GET /api/me` | — | signed-in user + list of databases |
+| `POST /api/deep` `{q, sources, from, engine, priority}` | minutes, background job | deep research, see below |
+| `GET /api/deep[/<id>]` | — | your runs / one run's steps, evidence and report |
+| `GET /api/me` | — | signed-in user + list of databases and deep-research models |
 | `GET /healthz` | — | today's answer count vs the daily budget |
 
 **Search and answer are deliberately asymmetric, and that asymmetry is the
@@ -203,6 +205,33 @@ kept), `ASK_GEN_WAIT`, `ASK_GEN_TIMEOUT`, `ASK_MAX_Q`.
 > Testing rate limits **sequentially proves nothing** — six sequential 8-second
 > requests stay inside any sane token bucket and all return 200. Test with real
 > concurrency: `seq 1 40 | xargs -P 40 -I{} curl -s -o /dev/null -w "%{http_code} " ...`
+
+### Deep research — `deep.py`
+
+For questions that link two subjects ("tubulin effect of nigella sativa"), where
+one search rarely finds the link because it is indirect. A background job makes
+several passes (literature-based "ABC" discovery):
+
+1. **plan** — the model splits the question into subjects (plant, protein,
+   effect…), with scientific names;
+2. **expand**, no model — an organism's compounds from LOTUS and Dr. Duke
+   (nutrients and near-universal compounds dropped, rarest first); compounds
+   tested on a target from ChEMBL assays and mechanisms; Wikipedia and PubMed
+   passages on each subject;
+3. **bridge** — exact join of A's compounds with the compounds tested on C; every
+   A compound searched together with C in ChEMBL / Dr. Duke / LOTUS; the model
+   names shared mechanisms and compounds worth checking, each a targeted search;
+4. **follow up** — the model names gaps and a few more searches;
+5. **report** — from the evidence only, `[n]` citations: short answer, direct
+   evidence, indirect links (A → B → C), gaps, hypotheses. Passages that name both
+   subjects are read first.
+
+The model is either the local one (through gpu-queue as client `ask-deep`, with
+`X-GPU-Priority: interactive|background` as the user picks) or Claude
+(`DEEP_CLAUDE_MODEL`, default `claude-opus-5-5`; offered only when
+`ANTHROPIC_API_KEY` is set; cost per run is shown with the report). Runs are kept
+as JSON in `ASK_DEEP_DIR`. Limits: `DEEP_USER_DAILY` runs per user per day,
+`DEEP_CLAUDE_DAILY` Claude runs per day for everyone, one running job per user.
 
 Keep the attribution in the page footer (Wikipedia CC BY-SA, ChEMBL CC BY-SA,
 LOTUS CC0, Dr. Duke USDA, PubMed NLM) and the citation links the UI renders.

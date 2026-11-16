@@ -12,3 +12,5 @@ einops
 # For ask_web.py only (the read-only web front end). Not needed to ingest,
 # index, or query from the CLI.
 #   pip install flask waitress
+# Deep research with Claude (optional; needs ANTHROPIC_API_KEY):
+#   pip install "anthropic>=2"

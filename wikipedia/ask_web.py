@@ -33,6 +33,7 @@ from collections import defaultdict, deque
 from flask import Flask, jsonify, request, session
 
 import auth
+import deep
 from config import cfg
 from sources import KEYWORD_SOURCES, SOURCES, search_sources, warm_up
 
@@ -46,6 +47,8 @@ GEN_TIMEOUT = float(os.environ.get("ASK_GEN_TIMEOUT", 120))
 USER_ASK_PER_HOUR = int(os.environ.get("ASK_IP_HOURLY", 20))
 USER_SEARCH_PER_HOUR = int(os.environ.get("ASK_IP_SEARCH_HOURLY", 120))
 DAILY_ASK_BUDGET = int(os.environ.get("ASK_DAILY_BUDGET", 300))
+DEEP_USER_DAILY = int(os.environ.get("DEEP_USER_DAILY", 10))      # jobs per user per day
+DEEP_CLAUDE_DAILY = int(os.environ.get("DEEP_CLAUDE_DAILY", 20))  # Claude jobs, all users
 
 # How many passages from each database go into the answer's context. Every
 # selected database gets a share, so the answer can draw on all of them.
@@ -190,11 +193,54 @@ def api_ask():
         sections=_results(found))
 
 
+@app.post("/api/deep")
+def api_deep_start():
+    if not request.is_json:   # JSON only: a cross-site form cannot send it
+        return jsonify(error="Send JSON."), 415
+    b = request.get_json(silent=True) or {}
+    q = (b.get("q") or "").strip()
+    if not q:
+        return jsonify(error="Missing question."), 400
+    if len(q) > MAX_Q:
+        return jsonify(error=f"Question too long (max {MAX_Q} characters)."), 400
+    engine = b.get("engine") if b.get("engine") in deep.engines() else "local"
+    priority = b.get("priority") if b.get("priority") in deep.PRIORITIES else "background"
+    src = [s for s in (b.get("sources") or []) if s in SOURCES] or list(SOURCES)
+    try:
+        year = int(b.get("from") or 0) or None
+    except (TypeError, ValueError):
+        year = None
+    who = auth.user_key()
+    if deep.active_for(who):
+        return jsonify(error="You already have a deep research running. "
+                             "Wait for it to finish."), 429
+    if deep.count_today(owner=who) >= DEEP_USER_DAILY:
+        return jsonify(error=f"Limit: {DEEP_USER_DAILY} deep research runs per day."), 429
+    if engine == "claude" and deep.count_today(engine="claude") >= DEEP_CLAUDE_DAILY:
+        return jsonify(error="Today's Claude budget is used up. Use the local model."), 429
+    return jsonify(id=deep.start(who, q, src, year, engine, priority))
+
+
+@app.get("/api/deep")
+def api_deep_list():
+    return jsonify(jobs=deep.list_for(auth.user_key()))
+
+
+@app.get("/api/deep/<job_id>")
+def api_deep_get(job_id):
+    d = deep.get(job_id)
+    u = auth.current_user()
+    if not d or (d["owner"] != auth.user_key() and not u.get("admin")):
+        return jsonify(error="Not found."), 404
+    return jsonify({k: v for k, v in d.items() if k != "owner"})
+
+
 @app.get("/api/me")
 def api_me():
     u = auth.current_user()
     return jsonify(email=u["email"], name=session.get("name", ""), admin=bool(u.get("admin")),
-                   sources=[{"id": k, **v} for k, v in SOURCES.items()])
+                   sources=[{"id": k, **v} for k, v in SOURCES.items()],
+                   engines=[{"id": k, "label": v} for k, v in deep.engines().items()])
 
 
 @app.get("/healthz")
@@ -203,7 +249,7 @@ def healthz():
         return jsonify(ok=True, asks_today=_day["asks"], budget=DAILY_ASK_BUDGET)
 
 
-PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
+PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Ask — Wikipedia, PubMed, ChEMBL, Dr. Duke, LOTUS</title>
 <style>
@@ -248,6 +294,16 @@ padding:.25rem .45rem;border-radius:3px;color:#fff;vertical-align:.1em}
 .meta,.score{color:var(--muted);font-size:.8rem;font-family:ui-monospace,monospace}
 .none{color:var(--muted);font-size:.9rem;border-top:1px solid var(--line);padding:.6rem 0}
 .err{color:#b4451f}
+details.how{margin:.9rem 0 0;font-size:.92rem;border:1px solid var(--line);border-radius:4px;padding:.5rem .8rem}
+details.how summary{cursor:pointer;color:var(--accent)}
+details.how ol{padding-left:1.3rem}details.how li{margin:.3rem 0}
+.steps{font:.8rem/1.5 ui-monospace,monospace;color:var(--muted);background:var(--card);padding:.6rem .8rem;border-radius:4px;max-height:22rem;overflow:auto}
+.steps b{color:var(--fg);font-weight:normal}
+.report{background:var(--card);padding:.4rem 1.2rem 1rem;border-radius:4px;border-left:3px solid var(--accent)}
+.report h2{font-size:1.1rem;margin:1.1rem 0 .3rem}.report ul{padding-left:1.2rem}
+.report a.c{color:var(--accent);text-decoration:none;font-size:.85em}
+.ev li{margin:.35rem 0;font-size:.9rem}.ev .why{color:var(--muted);font-size:.8rem}
+.jobs{font-size:.88rem;margin-top:.6rem}.jobs a{color:var(--accent)}
 footer{margin-top:3rem;border-top:1px solid var(--line);padding-top:1rem;color:var(--muted);font-size:.85rem}
 footer a{color:var(--accent)}
 </style></head><body>
@@ -259,11 +315,43 @@ phytochemical database and LOTUS natural products. Each database keeps its own t
   <input type=text id=q maxlength=__MAXQ__ placeholder="e.g. garlic allicin anthelmintic activity" autofocus>
   <button type=submit class=primary>Answer</button>
   <button type=button id=bSearch>Search only</button>
+  <button type=button id=bDeep>Deep research</button>
 </form>
 <fieldset><legend>Search in</legend><div id=srcs></div>
 <div class=opts><label>PubMed from year <input type=number id=yr min=1800 max=2100 placeholder=any></label></div>
 </fieldset>
+<fieldset><legend>Deep research</legend>
+<div><span class=opts>Model:</span> <span id=engines></span></div>
+<div><span class=opts>Priority on the GPU:</span>
+<label><input type=radio name=prio value=interactive> Interactive &mdash; goes ahead of batch work, I'm waiting</label>
+<label><input type=radio name=prio value=background checked> Background &mdash; runs when the card is free, check back later</label></div>
+<div class=jobs id=jobs></div>
+</fieldset>
+<details class=how><summary>How deep research works</summary>
+<p>For questions that link two subjects, like <i>tubulin effect of nigella sativa</i>. One search rarely
+answers them: papers about the plant seldom name the protein, and papers about the protein seldom name the
+plant. The link is usually indirect, through a compound of the plant or a mechanism both share. So deep
+research makes several passes:</p>
+<ol>
+<li><b>Split the question.</b> The model finds the subjects: A = nigella sativa (an organism), C = tubulin (a protein).</li>
+<li><b>Expand each subject, no model needed.</b> LOTUS and Dr. Duke list the plant's compounds (thymoquinone,
+thymohydroquinone, nigellone, &alpha;-hederin&hellip;). ChEMBL lists compounds tested on tubulin in lab assays, and drugs
+whose mechanism is tubulin. Wikipedia and PubMed add what is known about each.</li>
+<li><b>Look for bridges.</b> An exact join: which of the plant's compounds were tested on tubulin. Then every compound
+is searched together with tubulin in ChEMBL, Dr. Duke and LOTUS. The model reads both sides and names shared
+mechanisms (mitotic arrest, ROS, apoptosis&hellip;) and the compounds most worth checking; each becomes a targeted
+PubMed and Wikipedia search, e.g. <i>thymoquinone microtubule</i>.</li>
+<li><b>Follow up.</b> The model looks at what was found and runs a few more searches for the gaps.</li>
+<li><b>Report.</b> Written only from the evidence found, with numbered citations: short answer, direct evidence,
+indirect links (A &rarr; B &rarr; C, with how strong each step is), gaps, and hypotheses &mdash; marked as hypotheses, not facts.</li>
+</ol>
+<p><b>Model.</b> The local model is free but small: it plans and links less well, and every call waits its turn on
+the one GPU, so a run takes several minutes, longer at background priority. Claude reads far more evidence and reasons
+better; it costs money per run (typically well under a dollar), shown with the report. Steps 2 and 3's database joins
+are the same either way. <b>Priority</b> only matters for the local model.</p>
+</details>
 <p class=hint><b>Search only</b> lists matches from each database, no language model.
+<b>Deep research</b> makes several passes to find direct and indirect links (see below).
 <b>Answer</b> also has a local model write an answer from the top matches of every database you picked; one at a time, so it may queue.
 Wikipedia and PubMed match by meaning; ChEMBL, Dr. Duke and LOTUS match the words you type, so use names of plants, compounds or effects.</p>
 <div id=out></div>
@@ -289,6 +377,69 @@ fetch('/api/me').then(r=>r.json()).then(d=>{
     +((!saved||saved.includes(s.id))?' checked':'')+'> <span class="badge b-'+s.id+'">'+esc(s.label)+'</span></label>').join('');
   document.querySelectorAll('#srcs input').forEach(x=>x.onchange=()=>localStorage.setItem('ask_sources',JSON.stringify(picked())));
 });
+const saved_eng=localStorage.getItem('ask_engine'),saved_prio=localStorage.getItem('ask_prio');
+fetch('/api/me').then(r=>r.json()).then(d=>{
+  const E=d.engines||[];
+  document.getElementById('engines').innerHTML=E.map((e,i)=>'<label><input type=radio name=engine value='+e.id
+    +((saved_eng?saved_eng===e.id:i===0)?' checked':'')+'> '+esc(e.label)+'</label>').join('')
+    +(E.length<2?' <span class=opts>(Claude: no API key set on the server)</span>':'');
+  document.querySelectorAll('input[name=engine]').forEach(x=>x.onchange=()=>localStorage.setItem('ask_engine',x.value));
+  if(saved_prio){const p=document.querySelector('input[name=prio][value='+saved_prio+']');if(p)p.checked=true}
+  document.querySelectorAll('input[name=prio]').forEach(x=>x.onchange=()=>localStorage.setItem('ask_prio',x.value));
+  if(!document.querySelector('input[name=engine]:checked')&&E.length)document.querySelector('input[name=engine]').checked=true;
+});
+function loadJobs(){fetch('/api/deep').then(r=>r.json()).then(d=>{
+  const j=d.jobs||[];document.getElementById('jobs').innerHTML=j.length?'Your recent runs: '+j.slice(0,8).map(x=>
+    '<a href="#deep='+x.id+'">'+esc(x.q.slice(0,50))+'</a> <span class=opts>('+esc(x.status)+')</span>').join(' &middot; '):'';
+})}
+loadJobs();
+function md(t){
+  t=esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/\[(\d+)((?:[-–,] ?\d+)*)\]/g,'<a class=c href="#ev$1">[$1$2]</a>');
+  let h='',ul=false;
+  for(const l of t.split('\n')){
+    const m=l.match(/^\s*[-*] (.*)/);
+    if(m){if(!ul){h+='<ul>';ul=true}h+='<li>'+m[1]+'</li>';continue}
+    if(ul){h+='</ul>';ul=false}
+    if(/^#{1,4} /.test(l))h+='<h2>'+l.replace(/^#+ /,'')+'</h2>';
+    else if(l.trim())h+='<p>'+l+'</p>';
+  }
+  return h+(ul?'</ul>':'');
+}
+let poll=null;
+function showDeep(id){
+  clearTimeout(poll);
+  fetch('/api/deep/'+id).then(r=>r.json()).then(d=>{
+    if(d.error&&!d.id){out.innerHTML='<p class=err>'+esc(d.error)+'</p>';return}
+    if(!qi.value)qi.value=d.q;
+    let h='<h2>Deep research: '+esc(d.q)+'</h2><p class=sub>'+esc(d.model)+' &middot; '+esc(d.priority)+' priority &middot; '
+      +esc(d.status)+(d.usage&&d.usage.llm_calls?' &middot; '+d.usage.llm_calls+' model calls':'')
+      +(d.usage&&d.usage.usd?' &middot; $'+d.usage.usd.toFixed(3):'')+'</p>';
+    if(d.report)h+='<div class=report>'+md(d.report)+'</div>';
+    if(d.status==='error')h+='<p class=err>'+esc(d.error)+'</p>';
+    if(d.status==='queued'||d.status==='running')h+='<p class=sub>Working&hellip; this page updates by itself; you can also leave and come back via "Your recent runs".</p>';
+    h+='<details'+(d.report?'':' open')+'><summary>Steps</summary><div class=steps>'
+      +d.steps.map(s=>'<div>'+s.t+'s <b>'+esc(s.text)+'</b></div>').join('')+'</div></details>';
+    if(d.evidence&&d.evidence.length)h+='<details'+(d.report?' open':'')+'><summary>Evidence ('+d.evidence.length+')</summary><ol class=ev>'
+      +d.evidence.map(e=>'<li id=ev'+e.n+' value='+e.n+'>'+badge(e.source,e.label)+' <a href="'+esc(e.url||'#')+'" target=_blank rel=noopener>'
+        +esc(e.title)+'</a> <span class=why>'+esc(e.meta?e.meta+' · ':'')+esc(e.why)+'</span></li>').join('')+'</ol></details>';
+    out.innerHTML=h;
+    if(d.status==='queued'||d.status==='running')poll=setTimeout(()=>showDeep(id),3000);else loadJobs();
+  }).catch(()=>{poll=setTimeout(()=>showDeep(id),6000)});
+}
+async function goDeep(){
+  const q=qi.value.trim(); if(!q) return;
+  const src=picked(); if(!src.length){out.innerHTML='<p class=err>Pick at least one database.</p>';return}
+  const eng=(document.querySelector('input[name=engine]:checked')||{}).value||'local';
+  const prio=(document.querySelector('input[name=prio]:checked')||{}).value||'background';
+  out.innerHTML='<p class=sub>Starting deep research&hellip;</p>';
+  const r=await fetch('/api/deep',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({q,sources:src,from:yr.value||null,engine:eng,priority:prio})});
+  if(r.status===401){location.reload();return}
+  const d=await r.json();
+  if(d.error){out.innerHTML='<p class=err>'+esc(d.error)+'</p>';return}
+  location.hash='deep='+d.id;
+}
+function route(){const m=location.hash.match(/deep=([0-9a-f]{12})/);if(m)showDeep(m[1])}
 const badge=(id,label)=>'<span class="badge b-'+id+'">'+esc(label)+'</span>';
 function hit(h){
   return '<div class=hit>'+(h.url?'<a href="'+esc(h.url)+'" target=_blank rel=noopener>'+esc(h.title)+'</a>':'<b>'+esc(h.title)+'</b>')
@@ -323,6 +474,8 @@ async function go(mode){
 }
 document.getElementById('f').onsubmit=e=>{e.preventDefault();go('ask')};
 document.getElementById('bSearch').onclick=()=>go('search');
+document.getElementById('bDeep').onclick=goDeep;
+window.addEventListener('hashchange',route);route();
 </script></body></html>"""
 
 
