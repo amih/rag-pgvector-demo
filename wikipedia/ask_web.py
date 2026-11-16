@@ -1,8 +1,9 @@
-"""Read-only web front end for the Wikipedia pgvector index.
+"""Read-only web front end: one question searched across Wikipedia, PubMed,
+ChEMBL, Dr. Duke and LOTUS (see sources.py). Signed-in users only (auth.py).
 
 Two endpoints, deliberately asymmetric, because they cost wildly different things:
 
-  /api/search   pure pgvector similarity — no LLM. Milliseconds, no GPU. Cheap.
+  /api/search   vector + keyword search, no LLM. Under a few seconds. Cheap.
   /api/ask      retrieve + generate an answer with [n] citations. Seconds, and it
                 occupies the whole GPU while it runs.
 
@@ -13,7 +14,7 @@ politely sending one request per second still queue forever. So:
 
   * nginx  enforces the crude flood limits (req/s, concurrent conns, body size).
   * here   enforces the expensive-resource limits — one generation at a time, a
-           bounded wait for a slot, a per-IP hourly cap, and a global daily
+           bounded wait for a slot, a per-user hourly cap, and a global daily
            budget. Denial-of-wallet controls, with the GPU as the wallet.
 
 Everything here is in-process memory: this is a single-worker service by design
@@ -22,7 +23,6 @@ restart, which is fine — they exist to bound abuse, not to bill anyone.
 
 Run:  waitress-serve --listen=127.0.0.1:3600 ask_web:app
 """
-import html
 import json
 import os
 import threading
@@ -30,41 +30,41 @@ import time
 import urllib.request
 from collections import defaultdict, deque
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, session
 
+import auth
 from config import cfg
-from db import connect, vec_literal
-from embed_backends import get_backend
+from sources import KEYWORD_SOURCES, SOURCES, search_sources, warm_up
 
 app = Flask(__name__)
+auth.init_app(app)
+warm_up()
 
 MAX_Q = int(os.environ.get("ASK_MAX_Q", 300))              # chars
 GEN_SLOT_WAIT = float(os.environ.get("ASK_GEN_WAIT", 25))  # s to wait for the GPU
 GEN_TIMEOUT = float(os.environ.get("ASK_GEN_TIMEOUT", 120))
-IP_ASK_PER_HOUR = int(os.environ.get("ASK_IP_HOURLY", 20))
-IP_SEARCH_PER_HOUR = int(os.environ.get("ASK_IP_SEARCH_HOURLY", 120))
+USER_ASK_PER_HOUR = int(os.environ.get("ASK_IP_HOURLY", 20))
+USER_SEARCH_PER_HOUR = int(os.environ.get("ASK_IP_SEARCH_HOURLY", 120))
 DAILY_ASK_BUDGET = int(os.environ.get("ASK_DAILY_BUDGET", 300))
+
+# How many passages from each database go into the answer's context. Every
+# selected database gets a share, so the answer can draw on all of them.
+CONTEXT_PER_SOURCE = {"wiki": 2, "pubmed": 4, "chembl": 2, "duke": 2, "lotus": 1}
+PASSAGE_CHARS = 1200
 
 # One generation at a time. The 1080 has 8GB; llama3.1:8b fills it. A second
 # concurrent generation does not run twice as slow, it thrashes.
 _gpu = threading.BoundedSemaphore(1)
 _lock = threading.Lock()
-_hits = defaultdict(deque)          # (ip, kind) -> timestamps, trimmed to 1h
+_hits = defaultdict(deque)          # (user, kind) -> timestamps, trimmed to 1h
 _day = {"stamp": None, "asks": 0}
 
 
-def _client_ip() -> str:
-    # nginx sets X-Forwarded-For and is the only thing that can reach us
-    # (we bind 127.0.0.1), so the last hop is trustworthy here.
-    fwd = request.headers.get("X-Forwarded-For", "")
-    return fwd.split(",")[0].strip() if fwd else (request.remote_addr or "?")
-
-
-def _take_slot(ip: str, kind: str, per_hour: int):
-    """Sliding-window per-IP counter. Returns None if allowed, else an error."""
+def _take_slot(who: str, kind: str, per_hour: int):
+    """Sliding-window per-user counter. Returns None if allowed, else an error."""
     now = time.time()
     with _lock:
-        q = _hits[(ip, kind)]
+        q = _hits[(who, kind)]
         while q and now - q[0] > 3600:
             q.popleft()
         if len(q) >= per_hour:
@@ -80,39 +80,50 @@ def _take_daily_budget():
         if _day["stamp"] != today:
             _day.update(stamp=today, asks=0)
         if _day["asks"] >= DAILY_ASK_BUDGET:
-            return "Daily answer budget reached. Semantic search still works."
+            return "Daily answer budget reached. Search still works."
         _day["asks"] += 1
     return None
 
 
-def _question():
+def _params():
     q = (request.args.get("q") or "").strip()
     if not q:
         return None, "Missing ?q="
     if len(q) > MAX_Q:
         return None, f"Question too long (max {MAX_Q} characters)."
-    return q, None
-
-
-def retrieve(q, k):
-    qvec = vec_literal(get_backend().embed_query(q))
-    conn = connect()
-    conn.autocommit = True
+    src = [s for s in (request.args.get("sources") or "").split(",") if s in SOURCES]
     try:
-        with conn.cursor() as cur:
-            cur.execute(f"SET hnsw.ef_search = {cfg.ef_search}")
-            cur.execute(
-                f"SELECT title, content, 1 - (embedding <=> %s::{cfg.vector_type}) "
-                f"FROM wiki_chunks ORDER BY embedding <=> %s::{cfg.vector_type} LIMIT %s",
-                (qvec, qvec, k))
-            return cur.fetchall()
-    finally:
-        conn.close()
+        year = int(request.args.get("from") or 0) or None
+    except ValueError:
+        year = None
+    return {"q": q, "sources": src or list(SOURCES), "year": year}, None
+
+
+def _results(found):
+    """{source: hits} -> list of sections in fixed order, with labels."""
+    out = []
+    for s, meta in SOURCES.items():
+        if s not in found:
+            continue
+        hits = found[s]
+        sec = {"source": s, "label": meta["label"], "about": meta["about"],
+               "match": "keyword" if s in KEYWORD_SOURCES else "meaning"}
+        if isinstance(hits, dict):
+            sec.update(error=f"{meta['label']} search failed ({hits['error']}).", hits=[])
+        else:
+            sec["hits"] = [{**h, "extract": h["text"][:600]} for h in hits]
+            for h in sec["hits"]:
+                h.pop("text", None)
+        out.append(sec)
+    return out
 
 
 def generate(question, passages):
-    context = "\n\n".join(f"[{i+1}] {t}: {c}" for i, (t, c, _) in enumerate(passages))
-    prompt = ("Answer the question using ONLY the context below. Cite sources as [n]. "
+    context = "\n\n".join(
+        f"[{i+1}] ({p['label']}) {p['title']}: {p['text'][:PASSAGE_CHARS]}"
+        for i, p in enumerate(passages))
+    prompt = ("Answer the question using ONLY the context below. The passages come from "
+              "different databases, named in parentheses. Cite sources as [n]. "
               "If the answer is not in the context, say you don't know.\n\n"
               f"Context:\n{context}\n\nQuestion: {question}\nAnswer:")
     body = json.dumps({
@@ -127,59 +138,63 @@ def generate(question, passages):
 
 @app.get("/api/search")
 def api_search():
-    q, err = _question()
+    p, err = _params()
     if err:
         return jsonify(error=err), 400
-    if (err := _take_slot(_client_ip(), "search", IP_SEARCH_PER_HOUR)):
+    if (err := _take_slot(auth.user_key(), "search", USER_SEARCH_PER_HOUR)):
         return jsonify(error=err), 429
-
-    k = min(int(request.args.get("k", 8) or 8), 25)
+    k = min(int(request.args.get("k", 5) or 5), 15)
     t0 = time.time()
-    rows = retrieve(q, k)
-    # One chunk per article: a long article otherwise floods its own result set.
-    seen, out = set(), []
-    for title, content, sim in rows:
-        if title in seen:
-            continue
-        seen.add(title)
-        out.append({"title": title, "similarity": round(float(sim), 4),
-                    "extract": content[:600],
-                    "url": "https://en.wikipedia.org/wiki/" + title.replace(" ", "_")})
-    return jsonify(query=q, took_ms=round((time.time() - t0) * 1000, 1), results=out)
+    found = search_sources(p["q"], p["sources"], k, p["year"])
+    return jsonify(query=p["q"], took_ms=round((time.time() - t0) * 1000, 1),
+                   sections=_results(found))
 
 
 @app.get("/api/ask")
 def api_ask():
-    q, err = _question()
+    p, err = _params()
     if err:
         return jsonify(error=err), 400
-    ip = _client_ip()
-    if (err := _take_slot(ip, "ask", IP_ASK_PER_HOUR)):
+    if (err := _take_slot(auth.user_key(), "ask", USER_ASK_PER_HOUR)):
         return jsonify(error=err), 429
     if (err := _take_daily_budget()):
         return jsonify(error=err), 429
 
     t0 = time.time()
-    rows = retrieve(q, cfg.top_k)
-    if not rows:
-        return jsonify(error="No results."), 404
+    found = search_sources(p["q"], p["sources"], 5, p["year"])
+    passages = []
+    for s in SOURCES:
+        hits = found.get(s)
+        if isinstance(hits, list):
+            passages += [{**h, "source": s, "label": SOURCES[s]["label"]}
+                         for h in hits[:CONTEXT_PER_SOURCE[s]]]
+    if not passages:
+        return jsonify(error="No results in the selected databases."), 404
 
     # Bounded wait: fail fast rather than let a queue build behind the GPU.
     if not _gpu.acquire(timeout=GEN_SLOT_WAIT):
         return jsonify(error="Busy — one answer is generated at a time. "
-                             "Try again shortly, or use /api/search."), 503
+                             "Try again shortly, or use Search only."), 503
     try:
-        answer = generate(q, rows)
+        answer = generate(p["q"], passages)
     except Exception as e:
         return jsonify(error=f"Generation failed: {type(e).__name__}"), 502
     finally:
         _gpu.release()
 
     return jsonify(
-        query=q, answer=answer, took_ms=round((time.time() - t0) * 1000, 1),
-        sources=[{"n": i + 1, "title": t,
-                  "url": "https://en.wikipedia.org/wiki/" + t.replace(" ", "_")}
-                 for i, (t, _, _) in enumerate(rows)])
+        query=p["q"], answer=answer, took_ms=round((time.time() - t0) * 1000, 1),
+        sources=[{"n": i + 1, "source": x["source"], "label": x["label"],
+                  "title": x["title"], "url": x["url"], "meta": x.get("meta", "")}
+                 for i, x in enumerate(passages)],
+        sections=_results(found))
+
+
+@app.get("/api/me")
+def api_me():
+    u = auth.current_user()
+    return jsonify(email=u["email"], name=session.get("name", ""), admin=bool(u.get("admin")),
+                   sources=[{"id": k, **v} for k, v in SOURCES.items()])
 
 
 @app.get("/healthz")
@@ -190,65 +205,118 @@ def healthz():
 
 PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>Ask Wikipedia — semantic search over 35.8M chunks</title>
+<title>Ask — Wikipedia, PubMed, ChEMBL, Dr. Duke, LOTUS</title>
 <style>
-:root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fdfdfb;--muted:#5a5a5a;--line:#d8d5cc;--accent:#8a6a2f;--card:#f2f0ea}
-@media(prefers-color-scheme:dark){:root{--fg:#e8e6e1;--bg:#16161a;--muted:#a3a09a;--line:#33323a;--accent:#d4a94a;--card:#20202a}}
+:root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fdfdfb;--muted:#5a5a5a;--line:#d8d5cc;--accent:#8a6a2f;--card:#f2f0ea;
+--wiki:#3b6ea5;--pubmed:#2f7d5b;--chembl:#a0522d;--duke:#6b8e23;--lotus:#8b4f9e}
+@media(prefers-color-scheme:dark){:root{--fg:#e8e6e1;--bg:#16161a;--muted:#a3a09a;--line:#33323a;--accent:#d4a94a;--card:#20202a;
+--wiki:#7aa7d9;--pubmed:#6cc39b;--chembl:#e0956b;--duke:#a9c96a;--lotus:#c79ad6}}
 *{box-sizing:border-box}
-body{margin:0 auto;padding:2rem 1.25rem 5rem;max-width:44rem;background:var(--bg);color:var(--fg);
+body{margin:0 auto;padding:1.25rem 1.25rem 5rem;max-width:48rem;background:var(--bg);color:var(--fg);
 font:1.0625rem/1.65 Georgia,'Times New Roman',serif}
-h1{font-size:1.6rem;margin:0 0 .25rem}
-p.sub{color:var(--muted);font-size:.95rem;margin:0 0 1.5rem}
+.top{display:flex;justify-content:flex-end;gap:1rem;font-size:.85rem;color:var(--muted)}
+.top a{color:var(--accent)}
+h1{font-size:1.6rem;margin:.5rem 0 .25rem}
+p.sub{color:var(--muted);font-size:.95rem;margin:0 0 1.25rem}
 form{display:flex;gap:.5rem;flex-wrap:wrap}
 input[type=text]{flex:1 1 16rem;padding:.7rem .8rem;font:inherit;font-size:1rem;
 background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:4px}
+input[type=number]{width:6rem;padding:.3rem .4rem;font:inherit;font-size:.9rem;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:4px}
 button{padding:.7rem 1.1rem;font:inherit;font-size:.95rem;cursor:pointer;border-radius:4px;
 border:1px solid var(--line);background:var(--card);color:var(--fg)}
 button.primary{border-color:var(--accent);color:var(--accent)}
+fieldset{border:1px solid var(--line);border-radius:4px;margin:.9rem 0 0;padding:.5rem .8rem;font-size:.9rem}
+legend{color:var(--muted);padding:0 .3rem}
+fieldset label{display:inline-flex;align-items:center;gap:.3rem;margin:.15rem 1rem .15rem 0;cursor:pointer}
+.opts{margin-top:.4rem;color:var(--muted)}
 .hint{color:var(--muted);font-size:.85rem;margin:.6rem 0 0}
 #out{margin-top:2rem}
 .answer{background:var(--card);padding:1rem 1.2rem;border-radius:4px;border-left:3px solid var(--accent);white-space:pre-wrap}
-.hit{border-top:1px solid var(--line);padding:.9rem 0}
+.cites{font-size:.9rem;margin:.6rem 0 1.5rem;padding-left:0;list-style:none}
+.cites li{margin:.2rem 0}.cites a{color:var(--accent)}
+section{margin-top:1.8rem}
+section h2{font-size:1.05rem;margin:0;display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap}
+section h2 small{font-weight:normal;color:var(--muted);font-size:.8rem}
+.badge{display:inline-block;font:600 .72rem/1 ui-sans-serif,system-ui,sans-serif;letter-spacing:.02em;
+padding:.25rem .45rem;border-radius:3px;color:#fff;vertical-align:.1em}
+.b-wiki{background:var(--wiki)}.b-pubmed{background:var(--pubmed)}.b-chembl{background:var(--chembl)}
+.b-duke{background:var(--duke)}.b-lotus{background:var(--lotus)}
+@media(prefers-color-scheme:dark){.badge{color:#111}}
+.hit{border-top:1px solid var(--line);padding:.8rem 0}
 .hit a{color:var(--accent);text-decoration:none;font-weight:600}
-.hit p{margin:.3rem 0 0;font-size:.95rem;color:var(--fg)}
-.score{color:var(--muted);font-size:.8rem;font-family:ui-monospace,monospace}
+.hit p{margin:.3rem 0 0;font-size:.95rem}
+.meta,.score{color:var(--muted);font-size:.8rem;font-family:ui-monospace,monospace}
+.none{color:var(--muted);font-size:.9rem;border-top:1px solid var(--line);padding:.6rem 0}
 .err{color:#b4451f}
 footer{margin-top:3rem;border-top:1px solid var(--line);padding-top:1rem;color:var(--muted);font-size:.85rem}
 footer a{color:var(--accent)}
 </style></head><body>
-<h1>Ask Wikipedia</h1>
-<p class=sub>Semantic search over the full English Wikipedia &mdash; 35.8 million passages,
-768-dimension embeddings, HNSW index in Postgres. Self-hosted on one GPU at home.</p>
+<div class=top><span id=who></span><a id=adm href=/admin hidden>Users</a><a href=/logout>Sign out</a></div>
+<h1>Ask</h1>
+<p class=sub>One question, five databases: Wikipedia, PubMed abstracts, ChEMBL, Dr. Duke's
+phytochemical database and LOTUS natural products. Each database keeps its own top results.</p>
 <form id=f>
-  <input type=text id=q maxlength=__MAXQ__ placeholder="Ask a question, or describe what you're looking for" autofocus>
-  <button type=submit class=primary id=bAsk>Answer</button>
+  <input type=text id=q maxlength=__MAXQ__ placeholder="e.g. garlic allicin anthelmintic activity" autofocus>
+  <button type=submit class=primary>Answer</button>
   <button type=button id=bSearch>Search only</button>
 </form>
-<p class=hint><b>Search only</b> is pure vector similarity &mdash; no language model, instant.
-<b>Answer</b> runs a local model over the retrieved passages; one at a time, so it may queue.</p>
+<fieldset><legend>Search in</legend><div id=srcs></div>
+<div class=opts><label>PubMed from year <input type=number id=yr min=1800 max=2100 placeholder=any></label></div>
+</fieldset>
+<p class=hint><b>Search only</b> lists matches from each database, no language model.
+<b>Answer</b> also has a local model write an answer from the top matches of every database you picked; one at a time, so it may queue.
+Wikipedia and PubMed match by meaning; ChEMBL, Dr. Duke and LOTUS match the words you type, so use names of plants, compounds or effects.</p>
 <div id=out></div>
 <footer>
-Content from <a href="https://en.wikipedia.org">English Wikipedia</a>, licensed
-<a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>. Answers are
-generated from retrieved passages and may be wrong &mdash; follow the citations.
-Built by <a href="https://amiheines.com">Ami Heines</a>.
+Sources: <a href="https://en.wikipedia.org">Wikipedia</a> (CC BY-SA 4.0),
+<a href="https://pubmed.ncbi.nlm.nih.gov/">PubMed</a> (NLM),
+<a href="https://www.ebi.ac.uk/chembl/">ChEMBL</a> (CC BY-SA 3.0),
+<a href="https://phytochem.nal.usda.gov/">Dr. Duke's Phytochemical and Ethnobotanical Databases</a> (USDA),
+<a href="https://lotus.naturalproducts.net/">LOTUS</a> (CC0).
+Answers are generated from retrieved passages and may be wrong &mdash; follow the citations.
 </footer>
 <script>
-const out=document.getElementById('out'),qi=document.getElementById('q');
-const esc=s=>s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const out=document.getElementById('out'),qi=document.getElementById('q'),yr=document.getElementById('yr');
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let SOURCES=[];
+const saved=JSON.parse(localStorage.getItem('ask_sources')||'null');
+function picked(){return [...document.querySelectorAll('#srcs input:checked')].map(x=>x.value)}
+fetch('/api/me').then(r=>r.json()).then(d=>{
+  document.getElementById('who').textContent=d.email||'';
+  if(d.admin) document.getElementById('adm').hidden=false;
+  SOURCES=d.sources||[];
+  document.getElementById('srcs').innerHTML=SOURCES.map(s=>'<label title="'+esc(s.about)+'"><input type=checkbox value='+s.id
+    +((!saved||saved.includes(s.id))?' checked':'')+'> <span class="badge b-'+s.id+'">'+esc(s.label)+'</span></label>').join('');
+  document.querySelectorAll('#srcs input').forEach(x=>x.onchange=()=>localStorage.setItem('ask_sources',JSON.stringify(picked())));
+});
+const badge=(id,label)=>'<span class="badge b-'+id+'">'+esc(label)+'</span>';
+function hit(h){
+  return '<div class=hit>'+(h.url?'<a href="'+esc(h.url)+'" target=_blank rel=noopener>'+esc(h.title)+'</a>':'<b>'+esc(h.title)+'</b>')
+    +' <span class=score>'+h.score+'</span>'
+    +(h.meta?'<div class=meta>'+esc(h.meta)+'</div>':'')
+    +(h.extract?'<p>'+esc(h.extract)+(h.extract.length>=600?'&hellip;':'')+'</p>':'')+'</div>';
+}
+function sections(list){
+  return list.map(s=>'<section><h2>'+badge(s.source,s.label)+' <small>'+esc(s.about)+' &middot; matched by '+s.match+'</small></h2>'
+    +(s.error?'<p class=err>'+esc(s.error)+'</p>':s.hits.length?s.hits.map(hit).join('')
+      :'<div class=none>No match in '+esc(s.label)+(s.match==='keyword'?' &mdash; try plant, compound or effect names.':'.')+'</div>')
+    +'</section>').join('');
+}
 async function go(mode){
   const q=qi.value.trim(); if(!q) return;
-  out.innerHTML='<p class=sub>'+(mode==='ask'?'Retrieving and generating&hellip; (up to a minute)':'Searching&hellip;')+'</p>';
+  const src=picked(); if(!src.length){out.innerHTML='<p class=err>Pick at least one database.</p>';return}
+  out.innerHTML='<p class=sub>'+(mode==='ask'?'Searching and writing an answer&hellip; (up to a minute)':'Searching&hellip;')+'</p>';
+  const u='/api/'+(mode==='ask'?'ask':'search')+'?q='+encodeURIComponent(q)+'&sources='+src.join(',')+(yr.value?'&from='+encodeURIComponent(yr.value):'');
   try{
-    const r=await fetch('/api/'+(mode==='ask'?'ask':'search')+'?q='+encodeURIComponent(q));
+    const r=await fetch(u); if(r.status===401){location.reload();return}
     const d=await r.json();
     if(d.error){out.innerHTML='<p class=err>'+esc(d.error)+'</p>';return}
     let h='';
-    if(d.answer) h+='<div class=answer>'+esc(d.answer)+'</div>';
-    const list=d.results||d.sources||[];
-    h+=list.map(x=>'<div class=hit><a href="'+x.url+'" target=_blank rel=noopener>'+esc(x.title)+'</a>'
-      +(x.similarity!==undefined?' <span class=score>'+x.similarity+'</span>':'')
-      +(x.extract?'<p>'+esc(x.extract)+'&hellip;</p>':'')+'</div>').join('');
+    if(d.answer){
+      h+='<div class=answer>'+esc(d.answer)+'</div><ul class=cites>'
+        +d.sources.map(x=>'<li>['+x.n+'] '+badge(x.source,x.label)+' <a href="'+esc(x.url||'#')+'" target=_blank rel=noopener>'+esc(x.title)+'</a></li>').join('')+'</ul>';
+    }
+    h+=sections(d.sections||[]);
     h+='<p class=sub>'+d.took_ms+' ms</p>';
     out.innerHTML=h;
   }catch(e){out.innerHTML='<p class=err>Request failed.</p>'}

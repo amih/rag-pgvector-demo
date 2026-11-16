@@ -146,8 +146,28 @@ Tuning (env vars):
 
 ## Serving it on the web — `ask_web.py`
 
-A small read-only front end (Flask + waitress) exposing two endpoints and a
-single-page UI. `pip install flask waitress`, then:
+A small read-only front end (Flask + waitress) with a single-page UI. One
+question is searched in five databases at once (`sources.py`), and each keeps
+its own top results, so the small ones are not drowned out by Wikipedia:
+
+| source | how it is matched |
+|---|---|
+| Wikipedia (this index) | vector similarity |
+| PubMed abstracts (`../litdb`) | vector similarity, same model and query vector |
+| ChEMBL, Dr. Duke, LOTUS (`../litdb/load_structured.py`) | Postgres full-text, rare words weighted higher |
+
+The user can untick databases (`?sources=wiki,pubmed,chembl,duke,lotus`) and
+limit PubMed by year (`&from=2015`). Answers take the top passages of every
+selected database, labeled with the database name, and cite them as `[n]`.
+
+The query vector is computed on the **CPU** (`EMBED_BACKEND=st DEVICE=cpu`,
+~50 ms, identical vectors to Ollama's nomic-embed-text), so search keeps working
+while another job holds the GPU. Only answers need the GPU.
+
+Sign-in: Google (`auth.py`), plain OAuth code flow with an allow-list file
+(`ASK_USERS_FILE`, seeded from `ASK_INITIAL_ADMINS`; admins edit it at `/admin`).
+Needs `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ASK_PUBLIC_URL` (redirect URI
+is that + `/callback`) and `ASK_SECRET_KEY`. `pip install flask waitress`, then:
 
 ```bash
 set -a; . ./.env; set +a
@@ -156,11 +176,12 @@ waitress-serve --listen=127.0.0.1:3600 --threads=8 ask_web:app
 
 | endpoint | cost | notes |
 |---|---|---|
-| `GET /api/search?q=&k=` | ~0.5 s, no GPU | pure pgvector similarity, one chunk per article |
-| `GET /api/ask?q=` | ~8 s, holds the GPU | retrieve → generate, `[n]` citations |
+| `GET /api/search?q=&sources=&from=&k=` | ~1 s, no GPU | top hits per database |
+| `GET /api/ask?q=&sources=&from=` | ~10 s, holds the GPU | retrieve → generate, `[n]` citations |
+| `GET /api/me` | — | signed-in user + list of databases |
 | `GET /healthz` | — | today's answer count vs the daily budget |
 
-**The two are deliberately asymmetric, and that asymmetry is the whole
+**Search and answer are deliberately asymmetric, and that asymmetry is the
 protection design.** A requests-per-second limit is the wrong control for
 `/api/ask`: the binding resource is not request rate but a single GPU serving
 one generation at a time. Ten clients each politely sending 1 req/s still queue
@@ -169,22 +190,22 @@ forever. So put the crude flood limits in your reverse proxy (`limit_req`,
 
 - `BoundedSemaphore(1)` around generation, with a **bounded wait** — return 503
   rather than let a queue build behind the GPU;
-- per-IP sliding windows for answers and searches;
+- per-user sliding windows for answers and searches;
 - a **global daily answer budget** — denial-of-wallet control, with the GPU as
   the wallet;
 - a question-length cap.
 
 All in-process memory, because one GPU means one worker; counters reset on
 restart, which is fine — they bound abuse, they don't bill anyone. Tune with
-`ASK_DAILY_BUDGET`, `ASK_IP_HOURLY`, `ASK_IP_SEARCH_HOURLY`, `ASK_GEN_WAIT`,
-`ASK_GEN_TIMEOUT`, `ASK_MAX_Q`.
+`ASK_DAILY_BUDGET`, `ASK_IP_HOURLY`, `ASK_IP_SEARCH_HOURLY` (per user now, names
+kept), `ASK_GEN_WAIT`, `ASK_GEN_TIMEOUT`, `ASK_MAX_Q`.
 
 > Testing rate limits **sequentially proves nothing** — six sequential 8-second
 > requests stay inside any sane token bucket and all return 200. Test with real
 > concurrency: `seq 1 40 | xargs -P 40 -I{} curl -s -o /dev/null -w "%{http_code} " ...`
 
-Content served this way is Wikipedia text: keep the CC BY-SA attribution and the
-citation links that the UI already renders.
+Keep the attribution in the page footer (Wikipedia CC BY-SA, ChEMBL CC BY-SA,
+LOTUS CC0, Dr. Duke USDA, PubMed NLM) and the citation links the UI renders.
 
 ## How resume works
 
