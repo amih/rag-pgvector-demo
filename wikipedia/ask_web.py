@@ -420,7 +420,7 @@ function loadJobs(){fetch('/api/deep').then(r=>r.json()).then(d=>{
 })}
 loadJobs();
 function md(t){
-  t=esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/\[(\d+)((?:[-–,] ?\d+)*)\]/g,'<a class=c href="#ev$1">[$1$2]</a>');
+  t=esc(t).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/(^|[^*\w])\*([^*\n]+?)\*(?!\w)/g,'$1<i>$2</i>').replace(/\[(\d+)((?:[-–,] ?\d+)*)\]/g,'<a class=c href="#ev$1">[$1$2]</a>');
   let h='',ul=false;
   for(const l of t.split('\n')){
     const m=l.match(/^\s*[-*] (.*)/);
