@@ -40,6 +40,7 @@ from sources import KEYWORD_SOURCES, SOURCES, search_sources, warm_up
 app = Flask(__name__)
 auth.init_app(app)
 warm_up()
+deep.resume_interrupted()
 
 MAX_Q = int(os.environ.get("ASK_MAX_Q", 300))              # chars
 GEN_SLOT_WAIT = float(os.environ.get("ASK_GEN_WAIT", 25))  # s to wait for the GPU

@@ -253,6 +253,36 @@ def start(owner, q, sources, year, engine, priority):
     return job.d["id"]
 
 
+def resume_interrupted():
+    """Runs that were queued or running when the service stopped (a deploy, a
+    reboot) start again from the beginning. At most twice, so a run that crashes
+    the service cannot loop forever."""
+    if not os.path.isdir(DEEP_DIR):
+        return
+    for f in os.listdir(DEEP_DIR):
+        if not f.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(DEEP_DIR, f)) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if d.get("status") not in ("queued", "running"):
+            continue
+        job = Job(d)
+        d["restarts"] = d.get("restarts", 0) + 1
+        if d["restarts"] > 2:
+            d["status"], d["error"] = "error", "Interrupted by restarts twice. Run it again."
+            save(job)
+            continue
+        d.update(status="queued", plan=None, bridges=[], evidence=[], report=None, error=None)
+        d["steps"].append({"t": 0, "text": "The server restarted; starting this run again."})
+        with _store_lock:
+            _jobs[d["id"]] = job
+        save(job)
+        _pool.submit(_run, job)
+
+
 def _run(job):
     job.d["status"] = "running"
     job.d["started"] = time.time()
