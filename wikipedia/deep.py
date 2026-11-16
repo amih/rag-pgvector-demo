@@ -82,16 +82,31 @@ def engines():
 _claude_client = None
 
 
-def _local(prompt, schema, priority, max_out):
-    body = {"model": LOCAL_MODEL, "prompt": prompt, "stream": False,
+def _local(prompt, schema, priority, max_out, on_start=None):
+    """Streams, so we learn when the GPU queue hands us the card: the first chunk
+    arrives only once generation has started."""
+    body = {"model": LOCAL_MODEL, "prompt": prompt, "stream": True,
             "options": {"num_ctx": LOCAL_CTX, "temperature": 0.2, "num_predict": max_out}}
     if schema:
         body["format"] = schema
     req = urllib.request.Request(OLLAMA_URL + "/api/generate", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json",
                                           "X-GPU-Priority": priority})
+    parts = []
     with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as r:
-        return json.loads(r.read())["response"], (0, 0)
+        for line in r:
+            if not line.strip():
+                continue
+            if on_start:
+                on_start()
+                on_start = None
+            chunk = json.loads(line)
+            if chunk.get("error"):
+                raise RuntimeError(chunk["error"])
+            parts.append(chunk.get("response", ""))
+            if chunk.get("done"):
+                break
+    return "".join(parts), (0, 0)
 
 
 def _claude(prompt, schema, max_out):
@@ -133,7 +148,12 @@ class Job:
                 u["usd"] = round((u["input_tokens"] * CLAUDE_PRICE[0]
                                   + u["output_tokens"] * CLAUDE_PRICE[1]) / 1e6, 3)
         else:
-            text, _ = _local(prompt, schema, self.d["priority"], max_out)
+            self.d["gpu_wait"] = True     # the page shows "Waiting for the home GPU…"
+            try:
+                text, _ = _local(prompt, schema, self.d["priority"], max_out,
+                                 on_start=lambda: self.d.update(gpu_wait=False))
+            finally:
+                self.d["gpu_wait"] = False
         with self._lock:
             self.d["usage"]["llm_calls"] += 1
         if schema is None:
@@ -284,6 +304,7 @@ def resume_interrupted():
 
 
 def _run(job):
+    job.d["gpu_wait"] = False
     job.d["status"] = "running"
     job.d["started"] = time.time()
     try:

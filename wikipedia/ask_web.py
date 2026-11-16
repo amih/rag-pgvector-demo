@@ -49,6 +49,8 @@ USER_ASK_PER_HOUR = int(os.environ.get("ASK_IP_HOURLY", 20))
 USER_SEARCH_PER_HOUR = int(os.environ.get("ASK_IP_SEARCH_HOURLY", 120))
 DAILY_ASK_BUDGET = int(os.environ.get("ASK_DAILY_BUDGET", 300))
 DEEP_USER_DAILY = int(os.environ.get("DEEP_USER_DAILY", 10))      # jobs per user per day
+# Public status page of the GPU queue, linked while a run waits for the card.
+GPU_STATUS_URL = os.environ.get("DEEP_GPU_STATUS_URL", "")
 DEEP_CLAUDE_DAILY = int(os.environ.get("DEEP_CLAUDE_DAILY", 20))  # Claude jobs, all users
 
 # How many passages from each database go into the answer's context. Every
@@ -254,7 +256,8 @@ def api_me():
     u = auth.current_user()
     return jsonify(email=u["email"], name=session.get("name", ""), admin=bool(u.get("admin")),
                    sources=[{"id": k, **v} for k, v in SOURCES.items()],
-                   engines=[{"id": k, "label": v} for k, v in deep.engines().items()])
+                   engines=[{"id": k, "label": v} for k, v in deep.engines().items()],
+                   gpu_status_url=GPU_STATUS_URL)
 
 
 @app.get("/healthz")
@@ -459,6 +462,9 @@ function showDeep(id){
       +(d.usage&&d.usage.usd?' &middot; $'+d.usage.usd.toFixed(3):'')+'</p>';
     if(d.report)h+='<div class=report>'+md(d.report)+'</div>';
     if(d.status==='error')h+='<p class=err>'+esc(d.error)+'</p>';
+    if(d.gpu_wait&&(d.status==='queued'||d.status==='running'))h+='<p class=sub><b>Waiting for the home GPU&hellip;</b>'
+      +(GPU_URL?' <a href="'+esc(GPU_URL)+'" target=_blank rel=noopener>See the GPU queue</a>':'')
+      +(d.priority==='background'?' (background runs wait until the GPU is idle)':'')+'</p>';
     if(d.status==='queued'||d.status==='running')h+='<p class=sub>Working&hellip; this page updates by itself; you can also leave and come back via "Your recent runs".</p>';
     h+='<details'+(d.report?'':' open')+'><summary>Steps</summary><div class=steps>'
       +d.steps.map(s=>'<div>'+s.t+'s <b>'+esc(s.text)+'</b></div>').join('')+'</div></details>';
@@ -482,8 +488,8 @@ async function goDeep(){
   if(d.error){out.innerHTML='<p class=err>'+esc(d.error)+'</p>';return}
   location.hash='deep='+d.id;
 }
-let ADMIN=false;
-fetch('/api/me').then(r=>r.json()).then(d=>{ADMIN=!!d.admin});
+let ADMIN=false,GPU_URL='';
+fetch('/api/me').then(r=>r.json()).then(d=>{ADMIN=!!d.admin;GPU_URL=d.gpu_status_url||''});
 function showHistory(all){
   clearTimeout(poll);
   out.innerHTML='<p class=sub>Loading&hellip;</p>';
