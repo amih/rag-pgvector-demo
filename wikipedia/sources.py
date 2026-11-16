@@ -48,11 +48,13 @@ _backend, _backend_lock = None, threading.Lock()
 
 
 def embed_query(text):
+    # One at a time: nomic's remote code fills a rotary-embedding cache on first
+    # use, and a second thread arriving meanwhile crashes on the empty cache.
     global _backend
     with _backend_lock:
         if _backend is None:
             _backend = get_backend()
-    return _backend.embed_query(text)
+        return _backend.embed_query(text)
 
 
 def warm_up():
