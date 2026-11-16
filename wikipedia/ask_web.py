@@ -349,6 +349,32 @@ indirect links (A &rarr; B &rarr; C, with how strong each step is), gaps, and hy
 the one GPU, so a run takes several minutes, longer at background priority. Claude reads far more evidence and reasons
 better; it costs money per run (typically well under a dollar), shown with the report. Steps 2 and 3's database joins
 are the same either way. <b>Priority</b> only matters for the local model.</p>
+<h3 style="font-size:1rem;margin:1rem 0 .3rem">Where the data comes from</h3>
+<p>All five databases are open or free to use, downloaded in full and kept on one home server, so a search never
+leaves the machine (only Claude runs send the question and the found passages to Anthropic). They live in
+PostgreSQL with the <a href="https://github.com/pgvector/pgvector">pgvector</a> extension, on NVMe disks.</p>
+<ul>
+<li><b>Wikipedia</b> (CC BY-SA 4.0): the full English Wikipedia as an offline Kiwix ZIM file (text only, June 2026).
+Every article is cut into passages of about 1,200 characters with a small overlap: 35.8 million passages. Each is turned
+into a 768-number vector by the open <i>nomic-embed-text v1.5</i> model on the server's GPU, stored at half precision
+(<code>halfvec</code>) and indexed with an HNSW graph, so the closest passages in meaning come back in milliseconds.</li>
+<li><b>PubMed</b> (free from the US National Library of Medicine): the yearly baseline files plus the daily update files,
+fetched again every week. 29.6 million abstracts, each embedded with the same model (about 10 days of GPU time) and
+indexed with HNSW (56&nbsp;GB). Your question gets the same kind of vector, so one search serves both.</li>
+<li><b>ChEMBL</b> (EMBL-EBI, CC BY-SA 3.0): release 37, downloaded as a SQLite database. 2 million records: named
+molecules with their synonyms, mechanisms and indications, and lab assays with their target, organism, paper and the
+compounds tested.</li>
+<li><b>Dr. Duke's Phytochemical and Ethnobotanical Databases</b> (USDA, US public domain): the CSV export. 43,000 records:
+plants with their chemicals and folk uses by country, and chemicals with their biological activities and the plants that
+contain them, with amounts.</li>
+<li><b>LOTUS</b> (CC0, public domain): the frozen release from Zenodo. 265,000 records: natural products, their chemical
+class and the organisms they were found in, and each organism with its compounds.</li>
+</ul>
+<p>Wikipedia and PubMed are prose, so they are matched by <i>meaning</i> (vectors). ChEMBL, Dr. Duke and LOTUS are mostly
+names of compounds, plants and targets, where the exact word matters, so each record becomes one short text document
+in a Postgres full-text index, and rare words (a compound name) count for more than common ones ("activity"). The
+structured databases are reloaded every week, each in one transaction, so a search never sees half a database. The
+links in step 3 use those same records: an organism's compound list, an assay's tested compounds.</p>
 </details>
 <p class=hint><b>Search only</b> lists matches from each database, no language model.
 <b>Deep research</b> makes several passes to find direct and indirect links (see below).
