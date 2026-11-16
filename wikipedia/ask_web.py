@@ -223,7 +223,20 @@ def api_deep_start():
 
 @app.get("/api/deep")
 def api_deep_list():
-    return jsonify(jobs=deep.list_for(auth.user_key()))
+    u = auth.current_user()
+    all_users = request.args.get("all") == "1" and bool(u.get("admin"))
+    return jsonify(jobs=deep.list_for(auth.user_key(), all_users=all_users))
+
+
+@app.delete("/api/deep/<job_id>")
+def api_deep_delete(job_id):
+    d = deep.get(job_id)
+    u = auth.current_user()
+    if not d or (d["owner"] != auth.user_key() and not u.get("admin")):
+        return jsonify(error="Not found."), 404
+    if not deep.delete(job_id):
+        return jsonify(error="It is still running."), 409
+    return jsonify(ok=True)
 
 
 @app.get("/api/deep/<job_id>")
@@ -303,11 +316,15 @@ details.how ol{padding-left:1.3rem}details.how li{margin:.3rem 0}
 .report h2{font-size:1.1rem;margin:1.1rem 0 .3rem}.report ul{padding-left:1.2rem}
 .report a.c{color:var(--accent);text-decoration:none;font-size:.85em}
 .ev li{margin:.35rem 0;font-size:.9rem}.ev .why{color:var(--muted);font-size:.8rem}
+table.hist{width:100%;border-collapse:collapse;font-size:.88rem}
+table.hist td,table.hist th{text-align:left;padding:.45rem .4rem;border-top:1px solid var(--line);vertical-align:top}
+table.hist th{color:var(--muted);font-weight:normal}table.hist a{color:var(--accent)}
+table.hist button{padding:.15rem .5rem;font-size:.8rem}
 .jobs{font-size:.88rem;margin-top:.6rem}.jobs a{color:var(--accent)}
 footer{margin-top:3rem;border-top:1px solid var(--line);padding-top:1rem;color:var(--muted);font-size:.85rem}
 footer a{color:var(--accent)}
 </style></head><body>
-<div class=top><span id=who></span><a id=adm href=/admin hidden>Users</a><a href=/logout>Sign out</a></div>
+<div class=top><span id=who></span><a href="#history">Deep research history</a><a id=adm href=/admin hidden>Users</a><a href=/logout>Sign out</a></div>
 <h1>Ask</h1>
 <p class=sub>One question, five databases: Wikipedia, PubMed abstracts, ChEMBL, Dr. Duke's
 phytochemical database and LOTUS natural products. Each database keeps its own top results.</p>
@@ -416,7 +433,8 @@ fetch('/api/me').then(r=>r.json()).then(d=>{
 });
 function loadJobs(){fetch('/api/deep').then(r=>r.json()).then(d=>{
   const j=d.jobs||[];document.getElementById('jobs').innerHTML=j.length?'Your recent runs: '+j.slice(0,8).map(x=>
-    '<a href="#deep='+x.id+'">'+esc(x.q.slice(0,50))+'</a> <span class=opts>('+esc(x.status)+')</span>').join(' &middot; '):'';
+    '<a href="#deep='+x.id+'">'+esc(x.q.slice(0,50))+'</a> <span class=opts>('+esc(x.status)+')</span>').join(' &middot; ')
+    +' &middot; <a href="#history">all '+j.length+' &rarr;</a>':'';
 })}
 loadJobs();
 function md(t){
@@ -465,7 +483,37 @@ async function goDeep(){
   if(d.error){out.innerHTML='<p class=err>'+esc(d.error)+'</p>';return}
   location.hash='deep='+d.id;
 }
-function route(){const m=location.hash.match(/deep=([0-9a-f]{12})/);if(m)showDeep(m[1])}
+let ADMIN=false;
+fetch('/api/me').then(r=>r.json()).then(d=>{ADMIN=!!d.admin});
+function showHistory(all){
+  clearTimeout(poll);
+  out.innerHTML='<p class=sub>Loading&hellip;</p>';
+  fetch('/api/deep'+(all?'?all=1':'')).then(r=>r.json()).then(d=>{
+    const j=d.jobs||[];
+    let h='<h2>Deep research history</h2><p class=sub>Every run is saved until you delete it. Click a question to open its report.'
+      +(ADMIN?' <a href="#history'+(all?'':'-all')+'">'+(all?'Show only mine':'Show all users')+'</a>':'')+'</p>';
+    if(!j.length){out.innerHTML=h+'<p class=sub>No runs yet.</p>';return}
+    h+='<table class=hist><tr><th>Date</th><th>Question</th><th>Model</th><th>Time</th><th>Cost</th><th></th></tr>'
+      +j.map(x=>'<tr id=row'+x.id+'><td>'+esc((x.created||'').slice(0,16))+'</td><td><a href="#deep='+x.id+'">'+esc(x.q)+'</a>'
+        +(x.status!=='done'?' <span class=opts>('+esc(x.status)+')</span>':'')
+        +(all&&x.owner?'<div class=opts>'+esc(x.owner)+'</div>':'')+'</td><td>'+(x.engine==='claude'?'Claude':'Local')
+        +(x.engine==='local'?'<div class=opts>'+esc(x.priority)+'</div>':'')+'</td><td>'+(x.seconds!=null?Math.round(x.seconds)+' s':'')
+        +'</td><td>'+(x.usd?'$'+x.usd.toFixed(2):'')+'</td><td>'
+        +(x.status==='queued'||x.status==='running'?'':'<button onclick="delRun(\''+x.id+'\')">Delete</button>')+'</td></tr>').join('')+'</table>';
+    out.innerHTML=h;
+  });
+}
+async function delRun(id){
+  if(!confirm('Delete this deep research run? This cannot be undone.'))return;
+  const r=await fetch('/api/deep/'+id,{method:'DELETE'});const d=await r.json();
+  if(d.error){alert(d.error);return}
+  const row=document.getElementById('row'+id);if(row)row.remove();loadJobs();
+}
+function route(){
+  const m=location.hash.match(/deep=([0-9a-f]{12})/);if(m)return showDeep(m[1]);
+  if(location.hash==='#history')return showHistory(false);
+  if(location.hash==='#history-all')return showHistory(true);
+}
 const badge=(id,label)=>'<span class="badge b-'+id+'">'+esc(label)+'</span>';
 function hit(h){
   return '<div class=hit>'+(h.url?'<a href="'+esc(h.url)+'" target=_blank rel=noopener>'+esc(h.title)+'</a>':'<b>'+esc(h.title)+'</b>')

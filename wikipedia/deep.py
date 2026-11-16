@@ -181,19 +181,35 @@ def get(job_id):
     return d
 
 
-def list_for(owner, limit=20):
+def list_for(owner, limit=500, all_users=False):
+    """Newest first. Every run is kept until its owner deletes it."""
     out = []
     if os.path.isdir(DEEP_DIR):
         files = sorted((f for f in os.listdir(DEEP_DIR) if f.endswith(".json")),
                        key=lambda f: os.path.getmtime(os.path.join(DEEP_DIR, f)), reverse=True)
         for f in files:
             d = get(f[:-5])
-            if d and d["owner"] == owner:
-                out.append({k: d.get(k) for k in ("id", "q", "engine", "priority", "status",
-                                                  "created", "finished")})
+            if d and (all_users or d["owner"] == owner):
+                row = {k: d.get(k) for k in ("id", "q", "engine", "model", "priority", "status",
+                                             "created", "finished")}
+                row["usd"] = (d.get("usage") or {}).get("usd", 0)
+                row["seconds"] = d["steps"][-1]["t"] if d.get("steps") else None
+                row["sources"] = len(d.get("evidence") or [])
+                if all_users:
+                    row["owner"] = d["owner"]
+                out.append(row)
                 if len(out) >= limit:
                     break
     return out
+
+
+def delete(job_id):
+    """Removes a finished run. Running ones are left alone."""
+    d = get(job_id)
+    if not d or d["status"] in ("queued", "running"):
+        return False
+    os.remove(_path(job_id))
+    return True
 
 
 def count_today(owner=None, engine=None):
